@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>皮克敏明信片編輯器</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+</head>
+
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useRef, useEffect } = React;
+
+    // 底圖原始尺寸 2872 x 1920
+    const BG_WIDTH = 2872;
+    const BG_HEIGHT = 1920;
+    const PREVIEW_WIDTH = 600;
+    const PREVIEW_HEIGHT = Math.round((BG_HEIGHT / BG_WIDTH) * PREVIEW_WIDTH);
+    const ASPECT_RATIO = `${BG_WIDTH} / ${BG_HEIGHT}`;
+    // 寄件人頭像尺寸：以容器寬度的百分比表示（搭配 padding-top 技巧做出正方形），
+    // 確保在不同螢幕寬度與輸出時都不會跑版或被遮擋
+    // 注意：寄件人欄位的寬度只佔明信片寬度的 31%（100% - 67% - 2%），
+    // 所以百分比數值需以這個區塊的寬度為基準重新換算
+    const SENDER_ROW_WIDTH_RATIO = 1 - 0.67 - 0.02;
+    const AVATAR_PCT =
+      (Math.round(PREVIEW_HEIGHT * 0.187) / PREVIEW_WIDTH / SENDER_ROW_WIDTH_RATIO) * 100;
+    const SENDER_MARGIN_PCT = (27 / PREVIEW_WIDTH / SENDER_ROW_WIDTH_RATIO) * 100;
+
+    // 載入 html2canvas（用於將明信片預覽輸出成圖片）
+    function loadHtml2Canvas() {
+      if (window.html2canvas) return Promise.resolve(window.html2canvas);
+      return new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src =
+          "https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js";
+        script.onload = () => resolve(window.html2canvas);
+        script.onerror = reject;
+        document.head.appendChild(script);
+      });
+    }
+
+
+
+    // 明信片底圖清單。
+    // 所有底圖的長寬比建議與 BG_WIDTH / BG_HEIGHT 一致，避免變形。
+    const POSTCARD_BACKGROUNDS = [
+      "https://pikmin.wiki.gallery/images/thumb/a/a7/PB_postcard_normal_01.png/500px-PB_postcard_normal_01.png",
+      "https://pikmin.wiki.gallery/images/thumb/0/06/PB_postcard_normal_02.png/500px-PB_postcard_normal_02.png",
+      "https://pikmin.wiki.gallery/images/thumb/a/af/PB_postcard_normal_03.png/500px-PB_postcard_normal_03.png",
+      "https://pikmin.wiki.gallery/images/thumb/c/c3/PB_postcard_normal_04.png/500px-PB_postcard_normal_04.png",
+      "https://pikmin.wiki.gallery/images/thumb/9/95/PB_Postcard_Big_Flower.png/500px-PB_Postcard_Big_Flower.png",
+    ];
+
+    // 郵票圖片清單。陣列為空時不顯示郵票疊圖。
+    const STAMPS = [
+      "https://pikmin.wiki.gallery/images/thumb/2/2e/PB_Postcard_stamp_spring_00.png/250px-PB_Postcard_stamp_spring_00.png",
+      "https://pikmin.wiki.gallery/images/thumb/8/8d/PB_Postcard_stamp_summer_00.png/250px-PB_Postcard_stamp_summer_00.png",
+      "https://pikmin.wiki.gallery/images/thumb/9/97/PB_Postcard_stamp_fall_00.png/250px-PB_Postcard_stamp_fall_00.png",
+      "https://pikmin.wiki.gallery/images/thumb/5/5d/PB_Postcard_stamp_winter_00.png/250px-PB_Postcard_stamp_winter_00.png",
+    ];
+
+    // 郵票疊圖位置（相對於明信片預覽的百分比，請依實際版面調整）
+    const STAMP_STYLE = {
+      position: "absolute",
+      right: "1.5%",
+      top: "6%",
+      width: "18%",
+      height: "auto",
+    };
+
+    function ImageUploader({ image, onChange, label, shape = "rect" }) {
+      const [error, setError] = useState("");
+      const errorRef = useRef(null);
+      const errorTimerRef = useRef(null);
+
+      const showError = (message) => {
+        setError(message);
+      };
+
+      useEffect(() => {
+        if (error && errorRef.current) {
+          gsap.fromTo(
+            errorRef.current,
+            { opacity: 0, y: -6 },
+            { opacity: 1, y: 0, duration: 0.3, ease: "power1.out" }
+          );
+
+          if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+          errorTimerRef.current = setTimeout(() => {
+            gsap.to(errorRef.current, {
+              opacity: 0,
+              y: -6,
+              duration: 0.3,
+              ease: "power1.in",
+              onComplete: () => setError(""),
+            });
+          }, 3000);
+        }
+
+        return () => {
+          if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+        };
+      }, [error]);
+
+      const handleFile = (e) => {
+        const file = e.target.files && e.target.files[0];
+        if (!file) return;
+
+        const fileName = file.name || "";
+        const isHeic = /\.(heic|heif)$/i.test(fileName) || /heic|heif/i.test(file.type);
+
+        if (isHeic) {
+          showError("上傳失敗：不支援 HEIC/HEIF 格式，請先轉成 JPG 或 PNG 再上傳");
+          e.target.value = "";
+          return;
+        }
+
+        if (!file.type.startsWith("image/")) {
+          showError("上傳失敗：檔案格式錯誤，請選擇圖片檔案");
+          e.target.value = "";
+          return;
+        }
+
+        const MAX_SIZE = 10 * 1024 * 1024; // 10MB
+        if (file.size > MAX_SIZE) {
+          showError("上傳失敗：檔案大小超過 10MB");
+          e.target.value = "";
+          return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          const dataUrl = ev.target.result;
+          // 進一步確認瀏覽器能正確解碼此圖片（避免格式不支援卻誤判成功）
+          const testImg = new Image();
+          testImg.onload = () => onChange(dataUrl);
+          testImg.onerror = () => {
+            showError("上傳失敗：圖片格式不支援，請改用 JPG 或 PNG");
+          };
+          testImg.src = dataUrl;
+        };
+        reader.onerror = () => {
+          console.error("圖片讀取失敗", reader.error);
+          showError("上傳失敗：圖片讀取發生錯誤，請重試");
+        };
+        reader.readAsDataURL(file);
+        e.target.value = "";
+      };
+
+      const isCircle = shape === "circle";
+
+      return (
+        <div className="flex flex-col gap-2">
+          <label className="text-sm font-medium text-gray-700">{label}</label>
+          {error && (
+            <div
+              ref={errorRef}
+              className="rounded-md bg-red-50 px-3 py-1.5 text-xs text-red-600 border border-red-200"
+            >
+              {error}
+            </div>
+          )}
+          <div
+            className={`relative overflow-hidden border-2 border-dashed border-gray-300 bg-gray-50 ${isCircle ? "h-24 w-24 rounded-full" : "w-full rounded-lg"
+              }`}
+            style={isCircle ? {} : { aspectRatio: ASPECT_RATIO }}
+          >
+            {image ? (
+              <img
+                src={image}
+                alt={label}
+                className="h-full w-full object-cover"
+              />
+            ) : (
+              <div className="flex h-full w-full flex-col items-center justify-center gap-1 text-gray-400">
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  className={isCircle ? "h-6 w-6" : "h-10 w-10"}
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={1.5}
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 7.5L12 3m0 0L7.5 7.5M12 3v13.5"
+                  />
+                </svg>
+                {!isCircle && <span className="text-xs">尚未上傳圖片</span>}
+              </div>
+            )}
+            <input
+              type="file"
+              accept="image/*"
+              onChange={handleFile}
+              className="absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0"
+              title={`上傳${label}`}
+            />
+          </div>
+          {image && (
+            <button
+              type="button"
+              onClick={() => onChange(null)}
+              className="self-start text-xs text-red-500 hover:text-red-600 hover:underline"
+            >
+              移除圖片
+            </button>
+          )}
+        </div>
+      );
+    }
+
+    function PostcardEditor() {
+      const [mainImage, setMainImage] = useState(null);
+      const [avatarImage, setAvatarImage] = useState(null);
+
+      const [title, setTitle] = useState("軟綿綿的聖地");
+      const [location, setLocation] = useState("新店區，新北市");
+      const [senderName, setSenderName] = useState("戴皮");
+      const [isDownloading, setIsDownloading] = useState(false);
+      const [bgIndex, setBgIndex] = useState(4); // 預設顯示 postcard-5.png
+      const [stampIndex, setStampIndex] = useState(STAMPS.length > 0 ? 0 : -1);
+
+      const previewRef = useRef(null);
+
+      // 隨機切換明信片底圖與郵票
+      const handleShuffle = () => {
+        if (POSTCARD_BACKGROUNDS.length > 1) {
+          setBgIndex((prev) => {
+            let next = Math.floor(Math.random() * POSTCARD_BACKGROUNDS.length);
+            if (next === prev) {
+              next = (next + 1) % POSTCARD_BACKGROUNDS.length;
+            }
+            return next;
+          });
+        }
+        if (STAMPS.length > 1) {
+          setStampIndex((prev) => {
+            let next = Math.floor(Math.random() * STAMPS.length);
+            if (next === prev) {
+              next = (next + 1) % STAMPS.length;
+            }
+            return next;
+          });
+        }
+      };
+
+      const handleDownload = async () => {
+        if (!previewRef.current) return;
+        setIsDownloading(true);
+        try {
+          const html2canvas = await loadHtml2Canvas();
+          if (document.fonts && document.fonts.ready) {
+            await document.fonts.ready;
+          }
+          const canvas = await html2canvas(previewRef.current, {
+            useCORS: true,
+            allowTaint: true,
+            scale: 2,
+            backgroundColor: "#ffffff",
+            foreignObjectRendering: false,
+          });
+          const link = document.createElement("a");
+          link.download = "postcard.png";
+          link.href = canvas.toDataURL("image/png");
+          link.click();
+        } catch (err) {
+          console.error("下載失敗", err);
+        } finally {
+          setIsDownloading(false);
+        }
+      };
+
+      return (
+        <div className="mx-auto flex max-w-5xl flex-col gap-8 p-6">
+          <div className="text-center">
+            <h1 className="text-2xl font-bold text-gray-800">皮克敏明信片編輯器</h1>
+            <p className="mt-1 text-sm text-gray-500">
+              編輯文字與上傳圖片，即時預覽你的皮克敏明信片！
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 gap-8 lg:grid-cols-2">
+            {/* 左側：編輯區 */}
+            <div className="flex flex-col gap-6 rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+              <h2 className="text-lg font-semibold text-gray-800">編輯內容</h2>
+
+              <ImageUploader
+                image={mainImage}
+                onChange={setMainImage}
+                label="主要照片"
+              />
+
+              <div className="flex flex-col gap-1">
+                <label className="text-sm font-medium text-gray-700">
+                  明信片名稱
+                </label>
+                <input
+                  type="text"
+                  value={title}
+                  onChange={(e) => setTitle(e.target.value)}
+                  className="rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                  placeholder="輸入明信片名稱"
+                />
+              </div>
+
+              <div className="flex flex-col gap-1">
+                <label className="text-sm font-medium text-gray-700">
+                  寄件位置
+                </label>
+                <input
+                  type="text"
+                  value={location}
+                  onChange={(e) => setLocation(e.target.value)}
+                  className="rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                  placeholder="輸入寄件位置"
+                />
+              </div>
+
+              <hr className="border-gray-100" />
+
+              <ImageUploader
+                image={avatarImage}
+                onChange={setAvatarImage}
+                label="寄件人頭像"
+                shape="circle"
+              />
+
+              <div className="flex flex-col gap-1">
+                <label className="text-sm font-medium text-gray-700">
+                  寄件人名稱
+                </label>
+                <input
+                  type="text"
+                  value={senderName}
+                  onChange={(e) => setSenderName(e.target.value)}
+                  className="rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                  placeholder="輸入寄件人名稱"
+                />
+              </div>
+            </div>
+
+            {/* 右側：預覽區 */}
+            <div className="flex flex-col items-center gap-2">
+              <span className="text-sm font-medium text-gray-600">明信片預覽</span>
+              <div
+                ref={previewRef}
+                className="relative overflow-hidden rounded-lg shadow-md"
+                style={{
+                  width: `${PREVIEW_WIDTH}px`,
+                  maxWidth: "100%",
+                  aspectRatio: ASPECT_RATIO,
+                  backgroundImage: `url(${POSTCARD_BACKGROUNDS[bgIndex]})`,
+                  backgroundSize: "100% 100%",
+                  backgroundPosition: "center",
+                  backgroundRepeat: "no-repeat",
+                }}
+              >
+                {/* 主要照片區：對應底圖左側灰色方塊 */}
+                <div
+                  className="absolute overflow-hidden"
+                  style={{
+                    left: "2.2%",
+                    top: "3.3%",
+                    width: "62.8%",
+                    height: "93.3%",
+                  }}
+                >
+                  <div
+                    className="h-full w-full"
+                    style={
+                      mainImage
+                        ? {
+                          backgroundImage: `url(${mainImage})`,
+                          backgroundSize: "cover",
+                          backgroundPosition: "center",
+                          backgroundRepeat: "no-repeat",
+                        }
+                        : undefined
+                    }
+                  />
+
+                  {/* 標題與位置：疊加於照片左上角 */}
+                  <div
+                    className="absolute left-0 top-0 p-3"
+                    style={{ transform: "translateY(-8px)" }}
+                  >
+                    <h3 className="text-base font-bold leading-tight text-white sm:text-lg">
+                      {title || "（明信片名稱）"}
+                    </h3>
+                    <p className="mt-1 text-xs text-white/90">
+                      {location || "（寄件位置）"}
+                    </p>
+                  </div>
+                </div>
+
+                {/* 寄件人頭像 + 名稱：頭像對應底圖右下角白色圓形，名稱置於右側並垂直置中 */}
+                <div
+                  className="absolute flex items-center gap-2"
+                  style={{
+                    left: "67%",
+                    top: "80%",
+                    right: "2%",
+                    height: "18.7%",
+                  }}
+                >
+                  <div
+                    className="relative shrink-0 overflow-hidden rounded-full border-2 border-white"
+                    style={{
+                      width: `${AVATAR_PCT}%`,
+                      paddingTop: `${AVATAR_PCT}%`,
+                      marginBottom: `${SENDER_MARGIN_PCT}%`,
+                      transform: "translateY(-3.75px) translateX(0.25px)",
+                      backgroundColor: "#ffffff",
+                      boxSizing: "content-box",
+                      backgroundImage: avatarImage ? `url(${avatarImage})` : "none",
+                      backgroundSize: "cover",
+                      backgroundPosition: "center",
+                      backgroundRepeat: "no-repeat",
+                    }}
+                  />
+                  <p
+                    className="min-w-0 flex-1 text-xs font-medium text-gray-700"
+                    style={{
+                      marginBottom: `${SENDER_MARGIN_PCT}%`,
+                      whiteSpace: "nowrap",
+                      overflow: "visible",
+                      lineHeight: 1.4,
+                      transform: "translateY(-4px)",
+                    }}
+                  >
+                    {senderName || "（寄件人）"}
+                    <br />上
+                  </p>
+                </div>
+
+                {/* 郵票疊圖：若 STAMPS 陣列有內容才顯示 */}
+                {stampIndex >= 0 && STAMPS[stampIndex] && (
+                  <div
+                    style={{
+                      ...STAMP_STYLE,
+                      backgroundImage: `url(${STAMPS[stampIndex]})`,
+                      backgroundSize: "contain",
+                      backgroundPosition: "center",
+                      backgroundRepeat: "no-repeat",
+                      aspectRatio: "1 / 1",
+                    }}
+                  />
+                )}
+
+              </div>
+              <div className="mt-4 flex flex-wrap items-center justify-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleShuffle}
+                  className="rounded-md border border-gray-300 bg-white px-6 py-3 text-sm font-medium text-gray-700 shadow-sm transition hover:bg-gray-50"
+                >
+                  切換明信片
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDownload}
+                  disabled={isDownloading}
+                  className="rounded-md bg-black px-6 py-3 text-sm font-medium text-white shadow-sm transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isDownloading ? "下載中…" : "下載明信片"}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <footer className="mt-4 border-t border-gray-100 pt-4 text-center text-[10px] text-gray-400">
+            <p className="font-medium text-gray-500 text-xs">版權與授權聲明</p>
+            <p className="mt-1">
+              本網站為個人興趣製作之非官方工具，為「Pikmin」、「Pikmin Bloom」系列之<b>非官方粉絲作品</b>，<br />
+              僅供個人興趣與非商業用途使用，與
+              Nintendo、Niantic 官方無任何關聯、隸屬、贊助或背書關係，亦未獲其授權或認可。
+            </p>
+            <p className="mt-1">
+              頁面中所使用之「Pikmin」、「Pikmin Bloom」相關名稱、角色、圖像及商標，其著作權與商標權均屬
+              Nintendo / Niantic 所有。<br />
+              本站僅依據著作權法之「合理使用」原則，基於個人興趣、評論與資訊分享目的使用上述素材，若有侵權疑慮請告知，將立即移除或調整。
+            </p>
+            <p className="mt-1">
+              <a
+                href="https://www.pikminwiki.com/Pikipedia:General_disclaimer"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline hover:text-gray-500"
+              >
+                版權免責聲明
+              </a>
+              {" "}　聯絡方式：
+              <a
+                href="mailto:hellobbdai@gmail.com"
+                className="underline hover:text-gray-500"
+              >
+                hellobbdai@gmail.com
+              </a>
+            </p>
+          </footer>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<PostcardEditor />);
+  </script>
+</body>
+
+</html>
